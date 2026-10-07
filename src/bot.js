@@ -170,6 +170,15 @@ async function sendChart(ctx, cur, mk) {
   }
 }
 
+function cairoWeekStart() {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Cairo", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+  const g = t => Number(parts.find(p => p.type === t).value);
+  const d = new Date(Date.UTC(g("year"), g("month") - 1, g("day"), 12));
+  const weekday = new Date(d).getUTCDay(); // 0=أحد..6=سبت
+  d.setUTCDate(d.getUTCDate() - ((weekday + 1) % 7)); // بداية الأسبوع = السبت
+  return d.toISOString().slice(0, 10);
+}
+
 // كشف تفصيلي: كل المعاملات بوصفها مرتبة حسب البند ثم التاريخ
 async function handleStatement(ctx, arg) {
   await ctx.replyWithChatAction("typing").catch(() => {});
@@ -193,8 +202,20 @@ async function handleStatement(ctx, arg) {
       out.push(`  ${e.date.slice(5)} | ${e.details || "بدون وصف"} | ${e.amount} (${sign})`);
     }
   }
-  const total = cur.reduce((s, e) => s + (e.type === "income" ? -e.amount : e.amount), 0);
-  out.push(`\nالصافي: ${total} جنيه`);
+  const expenses = cur.filter(e => e.type !== "income").reduce((s, e) => s + e.amount, 0);
+  const income = cur.filter(e => e.type === "income").reduce((s, e) => s + e.amount, 0);
+  out.push(`\nإجمالي المصاريف: ${expenses} جنيه`);
+  if (income) out.push(`إجمالي الدخل: ${income} جنيه`);
+  out.push(`الصافي: ${expenses - income} جنيه`);
+  // أسبوعي: من السبت لحد النهاردة (من كل الداتا مش الشهر بس)
+  const ws = cairoWeekStart();
+  const weekTotal = all.filter(e => e.type !== "income" && (e.date || "") >= ws).reduce((s, e) => s + e.amount, 0);
+  out.push(`مصاريف الأسبوع ده (من السبت ${ws.slice(5)}): ${weekTotal} جنيه`);
+  // متوسط يومي: عدد الأيام المنقضية لو الشهر الحالي، وإلا أيام الشهر كاملة
+  const [yy, mm] = mk.split("-").map(Number);
+  const isCur = mk === cairoToday().slice(0, 7);
+  const days = isCur ? Number(cairoToday().slice(8, 10)) : new Date(yy, mm, 0).getDate();
+  out.push(`المتوسط اليومي: ${Math.round(expenses / Math.max(days, 1))} جنيه/يوم`);
   // قسم الرسالة لو طويلة (حد تليجرام 4096 حرف)
   let chunk = "";
   for (const line of out) {
