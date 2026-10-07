@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111827">
+<meta name="robots" content="noindex,nofollow">
+<title>مصاريفي</title>
+<link rel="manifest" href="/dash/manifest.json">
+<style>
+body{background:#111827;color:#f3f4f6;font-family:system-ui,Tahoma;margin:0;padding:16px}
+h1{font-size:20px;margin:4px 0 12px}
+.cards{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px}
+.card{background:#1f2937;border-radius:12px;padding:12px}
+.card b{font-size:20px;display:block;margin-top:4px}
+.card span{color:#9ca3af;font-size:13px}
+.full{grid-column:1/-1}
+img.chart{width:100%;border-radius:12px;background:#fff;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:14px;background:#1f2937;border-radius:12px;overflow:hidden}
+th,td{padding:8px;border-bottom:1px solid #374151;text-align:right}
+th{color:#9ca3af;font-weight:normal}
+.bar{height:8px;background:#374151;border-radius:4px;margin-top:6px}
+.bar i{display:block;height:100%;border-radius:4px;background:#22c55e}
+.warn{background:#7c2d12}.bad{background:#b91c1c}
+.row{display:flex;gap:8px;margin-bottom:12px}
+input,button{background:#1f2937;color:#fff;border:1px solid #374151;border-radius:10px;padding:10px;font-size:15px}
+button{background:#2563eb;border:none;flex:1}
+#err{color:#f87171;margin-bottom:10px}
+.hint{color:#9ca3af;font-size:12px;margin-top:14px}
+</style>
+</head>
+<body>
+<h1>مصاريفي 💰 <span id="mk" style="color:#9ca3af;font-size:14px"></span></h1>
+<div id="err"></div>
+<div class="cards">
+<div class="card"><span>مصروف الشهر</span><b id="mExp">…</b></div>
+<div class="card"><span>الأسبوع ده</span><b id="wTot">…</b></div>
+<div class="card"><span>المتوسط اليومي</span><b id="dAvg">…</b></div>
+<div class="card"><span>الصافي</span><b id="net">…</b></div>
+<div class="card full"><span>الميزانيات</span><div id="budgets">…</div></div>
+</div>
+<img class="chart" id="chart" alt="الرسم البياني">
+<div class="row">
+<input id="month" placeholder="الشهر (2026-10)" maxlength="7">
+<button onclick="loadStatement()">عرض الكشف</button>
+</div>
+<table><thead><tr><th>التاريخ</th><th>الوصف</th><th>البند</th><th>المبلغ</th></tr></thead><tbody id="rows"></tbody></table>
+<p class="hint">للتثبيت على الموبايل: من متصفح كروم ← القائمة ⋮ ← Add to Home screen. الصفحة بتشتغل أوفلاين لآخر داتا متحملة.</p>
+<script>
+const q = new URLSearchParams(location.search);
+const KEY = q.get("key") || "";
+const COLORS = ["36A2EB","FF9F40","FF6384","4BC0C0","9966FF","FFCD56"];
+const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+async function api(p) {
+  const r = await fetch("/dash/" + p + (p.includes("?") ? "&" : "?") + "key=" + encodeURIComponent(KEY));
+  if (!r.ok) throw new Error(r.status === 401 ? "اللينك ناقص مفتاح صحيح (?key=...)" : "خطأ " + r.status);
+  return r.json();
+}
+async function load() {
+  const s = await api("api/summary");
+  document.getElementById("mk").textContent = s.mk;
+  document.getElementById("mExp").textContent = s.monthExp + " ج";
+  document.getElementById("wTot").textContent = s.weekTotal + " ج";
+  document.getElementById("dAvg").textContent = s.dailyAvg + " ج/يوم";
+  document.getElementById("net").textContent = (s.monthExp - s.monthIncome) + " ج";
+  document.getElementById("budgets").innerHTML = s.budgets.length ? s.budgets.map(b => {
+    const cls = b.pct >= 100 ? "bad" : b.pct >= 80 ? "warn" : "";
+    return `<div style="margin-top:8px">${esc(b.c)}: ${b.spent}/${b.limit} (${b.pct}%)<div class="bar"><i class="${cls}" style="width:${Math.min(b.pct,100)}%"></i></div></div>`;
+  }).join("") : "لا يوجد ميزانيات";
+  const cfg = { type: "doughnut", data: { labels: s.top.map((_, i) => "p" + (i + 1)), datasets: [{ data: s.top.map(t => t.v), backgroundColor: s.top.map((_, i) => "#" + COLORS[i % 6]) }] }, options: { plugins: { legend: { display: false } } } };
+  document.getElementById("chart").src = "https://quickchart.io/chart?c=" + encodeURIComponent(JSON.stringify(cfg)) + "&w=600&h=380&f=png";
+  document.getElementById("month").value = s.mk;
+  await loadStatement();
+}
+async function loadStatement() {
+  const m = document.getElementById("month").value.trim();
+  const s = await api("api/statement?month=" + encodeURIComponent(m));
+  document.getElementById("rows").innerHTML = s.rows.map(r =>
+    `<tr><td>${String(r.date).slice(5)}</td><td>${esc(r.details || "—").slice(0, 30)}</td><td>${esc(r.category)}</td><td>${r.amount}</td></tr>`
+  ).join("") || `<tr><td colspan="4">لا يوجد</td></tr>`;
+}
+load().catch(e => document.getElementById("err").textContent = e.message);
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("/dash/sw.js").catch(() => {});
+</script>
+</body>
+</html>

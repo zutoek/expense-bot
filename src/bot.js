@@ -2,6 +2,7 @@ import "dotenv/config";
 import http from "node:http";
 import { Bot, InlineKeyboard } from "grammy";
 import { routeMessage, analyze, CATEGORIES } from "./ai.js";
+import { createDashHandler, loadDashFiles } from "./dash.js";
 import {
   ensureHeaders, appendExpenses, getRecent, getAll,
   deleteById, updateAmountById, setBudget, getBudgets,
@@ -78,7 +79,10 @@ function quickCategory(text) {
 
 // البورت أولا عشان الاستضافة تشوفنا حيين حتى لو جوجل واقع لحظيا
 const port = Number(process.env.PORT || 3000);
-http.createServer((req, res) => {
+http.createServer(async (req, res) => {
+  try {
+    if (await dashHandler(req, res)) return;
+  } catch {}
   res.writeHead(200, { "content-type": "text/plain" });
   res.end("bot running");
 }).listen(port, () => console.log(`healthcheck on ${port}`));
@@ -99,7 +103,7 @@ bot.catch((err) => console.error("BOT ERROR:", err?.message || err));
 // ---------- أوامر ----------
 
 const START_TEXT =
-  "أهلا! ابعت مصروفك بالعربي عادي، مثال:\nاشتريت بيض ورز ب 30 ودفعت 500 كهربا\n\nالأوامر:\n/يومي - صرفت كام النهاردة\n/شهري - ملخص الشهر\n/ميزانية [بند] [مبلغ] - مثال: /ميزانية أكل وشرب 3000\n/undo - تراجع عن آخر تسجيل\n/اسأل [سؤالك] - مثال: /اسأل شيل الفاكهة من حسبة الشهر؟\n/ثابت [وصف] [مبلغ] [يوم] - مثال: /ثابت إيجار 2000 1\n/ثوابت - قايمة الثوابت\n/رسم - رسم بياني للشهر\n/كشف - كل المعاملات بالتفصيل (ممكن: /كشف 9)";
+  "أهلا! ابعت مصروفك بالعربي عادي، مثال:\nاشتريت بيض ورز ب 30 ودفعت 500 كهربا\n\nالأوامر:\n/يومي - صرفت كام النهاردة\n/شهري - ملخص الشهر\n/ميزانية [بند] [مبلغ] - مثال: /ميزانية أكل وشرب 3000\n/undo - تراجع عن آخر تسجيل\n/اسأل [سؤالك] - مثال: /اسأل شيل الفاكهة من حسبة الشهر؟\n/ثابت [وصف] [مبلغ] [يوم] - مثال: /ثابت إيجار 2000 1\n/ثوابت - قايمة الثوابت\n/رسم - رسم بياني للشهر\n/كشف - كل المعاملات بالتفصيل (ممكن: /كشف 9)\n/لوحة - لينك لوحة العرض";
 
 async function dayReport(ctx) {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "Africa/Cairo" });
@@ -302,6 +306,12 @@ async function undoLast(ctx) {
 }
 
 async function handlePing(ctx) { await ctx.reply("شغال"); }
+async function handleDashLink(ctx) {
+  const secret = process.env.DASHBOARD_KEY || "";
+  const base = (process.env.DASHBOARD_URL || "").replace(/\/+$/, "");
+  if (!secret || !base) return ctx.reply("لوحة العرض مش متفعلة على السيرفر (ناقص DASHBOARD_KEY أو DASHBOARD_URL).");
+  await ctx.reply(`لوحة العرض الخاصة بيك:\n${base}/dash?key=${secret}_${ctx.from.id}\n\nافتحها من متصفح الموبايل وثبتها: القائمة ⋮ ← Add to Home screen.\nاللينك خاص بيك، متبعتهوش لحد.`);
+}
 async function handleAsk(ctx, q) {
   if (!q) return ctx.reply("اكتب سؤالك بعد /اسأل");
   const all = await getAll(ctx.from.id);
@@ -311,6 +321,49 @@ async function handleAsk(ctx, q) {
   pushHist(ctx.from.id, "assistant", ans);
   await ctx.reply(ans);
 }
+
+// ---------- داشبورد العرض (PWA) ----------
+
+async function apiSummary(userId) {
+  const all = await getAll(userId);
+  const today = cairoToday();
+  const mk = today.slice(0, 7);
+  const cur = all.filter(e => (e.date || "").startsWith(mk));
+  const monthExp = cur.filter(e => e.type !== "income").reduce((s, e) => s + e.amount, 0);
+  const monthIncome = cur.filter(e => e.type === "income").reduce((s, e) => s + e.amount, 0);
+  const ws = cairoWeekStart();
+  const weekTotal = all.filter(e => e.type !== "income" && (e.date || "") >= ws).reduce((s, e) => s + e.amount, 0);
+  const days = Number(today.slice(8, 10));
+  const budgets = await getCachedBudgets(userId).catch(() => []);
+  return {
+    today, mk,
+    monthExp, monthIncome, weekTotal,
+    dailyAvg: Math.round(monthExp / Math.max(days, 1)),
+    top: summarize(cur).byCat.slice(0, 6).map(([c, v]) => ({ c, v })),
+    budgets: budgets.map(b => {
+      const spent = cur.filter(e => e.category === b.category).reduce((s, e) => s + e.amount, 0);
+      return { c: b.category, limit: b.monthly_limit, spent, pct: b.monthly_limit ? Math.round((spent / b.monthly_limit) * 100) : 0 };
+    }),
+  };
+}
+
+async function apiStatement(userId, month) {
+  const all = await getAll(userId);
+  let mk = cairoToday().slice(0, 7);
+  if (/^\d{4}-\d{2}$/.test(month || "")) mk = month;
+  const rows = all
+    .filter(e => (e.date || "").startsWith(mk))
+    .sort((a, b) => (a.date < b.date ? -1 : 1))
+    .slice(0, 500)
+    .map(e => ({ date: e.date, details: e.details, amount: e.amount, category: e.category, type: e.type || "expense" }));
+  return { mk, count: rows.length, rows };
+}
+
+const dashHandler = createDashHandler({
+  secret: process.env.DASHBOARD_KEY || "",
+  apiSummary, apiStatement,
+  files: loadDashFiles(),
+});
 
 // تليجرام مبيعترفش بالأوامر العربي كـ commands، فبنستقبلها هنا كنص عادي
 async function handleSlashText(ctx, text) {
@@ -328,6 +381,7 @@ async function handleSlashText(ctx, text) {
   if (["حذف_ثابت", "حذف-ثابت", "مسح_ثابت"].includes(cmd)) return handleDelFixed(ctx);
   if (["رسم", "رسم_بياني", "chart"].includes(cmd)) return handleChart(ctx);
   if (["كشف", "كشف_حساب", "كشف-حساب", "statement"].includes(cmd)) return handleStatement(ctx, arg.trim());
+  if (["لوحة", "لوحه", "داشبورد", "dashboard"].includes(cmd)) return handleDashLink(ctx);
   return; // أمر غير معروف: تجاهل بصمت
 }
 

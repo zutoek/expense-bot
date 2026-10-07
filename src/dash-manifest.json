@@ -1,0 +1,10 @@
+{
+  "name": "مصاريفي",
+  "short_name": "مصاريفي",
+  "start_url": "./",
+  "display": "standalone",
+  "dir": "rtl",
+  "lang": "ar",
+  "background_color": "#111827",
+  "theme_color": "#111827"
+}
