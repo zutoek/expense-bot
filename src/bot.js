@@ -6,6 +6,7 @@ import {
   ensureHeaders, appendExpenses, getRecent, getAll,
   deleteById, updateAmountById, setBudget, getBudgets,
   addRecurring, getRecurring, setRecurringPosted, setRecurringActive,
+  getMeta, setMeta,
   withRetry,
 } from "./sheets.js";
 
@@ -99,7 +100,7 @@ bot.catch((err) => console.error("BOT ERROR:", err?.message || err));
 // ---------- أوامر ----------
 
 const START_TEXT =
-  "أهلا! ابعت مصروفك بالعربي عادي، مثال:\nاشتريت بيض ورز ب 30 ودفعت 500 كهربا\n\nالأوامر:\n/يومي - صرفت كام النهاردة\n/شهري - ملخص الشهر\n/ميزانية [بند] [مبلغ] - مثال: /ميزانية أكل وشرب 3000\n/undo - تراجع عن آخر تسجيل\n/اسأل [سؤالك] - مثال: /اسأل شيل الفاكهة من حسبة الشهر؟\n/ثابت [وصف] [مبلغ] [يوم] - مثال: /ثابت إيجار 2000 1\n/ثوابت - قايمة الثوابت\n/رسم - رسم بياني للشهر\n/كشف - كل المعاملات بالتفصيل (ممكن: /كشف 9)";
+  "أهلا! ابعت مصروفك بالعربي عادي، مثال:\nاشتريت بيض ورز ب 30 ودفعت 500 كهربا\n\nالأوامر:\n/يومي - صرفت كام النهاردة\n/شهري - ملخص الشهر\n/ميزانية [بند] [مبلغ] - مثال: /ميزانية أكل وشرب 3000\n/undo - تراجع عن آخر تسجيل\n/اسأل [سؤالك] - مثال: /اسأل شيل الفاكهة من حسبة الشهر؟\n/ثابت [وصف] [مبلغ] [يوم] - مثال: /ثابت إيجار 2000 1\n/ثوابت - قايمة الثوابت\n/رسم - رسم بياني للشهر\n/كشف - كل المعاملات بالتفصيل (ممكن: /كشف 9)\n/تنبيه [تشغيل/ايقاف] - الملخص الليلي والتحذيرات";
 
 async function dayReport(ctx) {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "Africa/Cairo" });
@@ -264,7 +265,49 @@ async function handleDelFixed(ctx) {
   await ctx.reply(`وقفت: ${target.details} (${target.amount} جنيه يوم ${target.day})`);
 }
 
-// يشتغل مع بداية التشغيل + كل 6 ساعات: يسجل أي ثابت معاده جه ومينبه صاحبه
+// ملخص ليلي 10م بتوقيت القاهرة: يتبعت مرة واحدة يوميا لكل مستخدم مشغل التنبيهات
+async function nightlyCheck() {
+  try {
+    const hour = Number(new Intl.DateTimeFormat("en-US", { timeZone: "Africa/Cairo", hour: "numeric", hour12: false }).format(new Date()));
+    if (hour < 22) return;
+    const today = cairoToday();
+    if ((await getMeta("last_nightly")) === today) return;
+    const exp = await getAll(null).catch(() => []);
+    const rec = await getRecurring().catch(() => []);
+    const users = [...new Set([...exp.map(e => String(e.user_id)), ...rec.map(r => String(r.user_id))])].filter(u => u && u !== "TEST");
+    for (const u of users) {
+      if ((await getMeta(`notify_${u}`)) === "off") continue;
+      const mine = exp.filter(e => String(e.user_id) === u);
+      const dayList = mine.filter(e => e.date === today && e.type !== "income");
+      const mk = today.slice(0, 7);
+      const monthExp = mine.filter(e => (e.date || "").startsWith(mk) && e.type !== "income").reduce((s, e) => s + e.amount, 0);
+      const d = summarize(dayList);
+      const top = d.byCat[0] ? ` (أعلى بند: ${d.byCat[0][0]} ${d.byCat[0][1]})` : "";
+      let msg = `ملخص اليوم ${today}:\n- مصروف النهاردة: ${d.total} جنيه${top}\n- إجمالي الشهر: ${monthExp} جنيه`;
+      const budgets = await getCachedBudgets(u).catch(() => []);
+      const over = budgets.map(b => {
+        const spent = mine.filter(e => (e.date || "").startsWith(mk) && e.category === b.category).reduce((s, e) => s + e.amount, 0);
+        return { b, pct: b.monthly_limit ? spent / b.monthly_limit : 0, spent };
+      }).filter(x => x.pct >= 0.8);
+      if (over.length) msg += `\n\nخد بالك:\n` + over.map(x => `- ${x.b.category}: ${x.spent}/${x.b.monthly_limit} (${Math.round(x.pct * 100)}%)`).join("\n");
+      await bot.api.sendMessage(u, msg).catch(() => {});
+    }
+    await setMeta("last_nightly", today).catch(() => {});
+    console.log("nightly sent for", today);
+  } catch (e) {
+    console.error("nightly failed:", e?.message);
+  }
+}
+
+async function handleNotify(ctx, arg) {
+  const u = String(ctx.from.id);
+  if (/ايقاف|اقف|off|stop/.test(arg)) {
+    await setMeta(`notify_${u}`, "off");
+    return ctx.reply("وقفت التنبيهات الليلية. للتشغيل: /تنبيه تشغيل");
+  }
+  await setMeta(`notify_${u}`, "on");
+  return ctx.reply("التنبيهات شغالة: ملخص كل ليلة 10م + تحذير فوري عند تجاوز الميزانية. للإيقاف: /تنبيه ايقاف");
+}
 async function checkRecurring() {
   try {
     const today = cairoToday();
@@ -328,6 +371,7 @@ async function handleSlashText(ctx, text) {
   if (["حذف_ثابت", "حذف-ثابت", "مسح_ثابت"].includes(cmd)) return handleDelFixed(ctx);
   if (["رسم", "رسم_بياني", "chart"].includes(cmd)) return handleChart(ctx);
   if (["كشف", "كشف_حساب", "كشف-حساب", "statement"].includes(cmd)) return handleStatement(ctx, arg.trim());
+  if (["تنبيه", "تنبيهات", "notify"].includes(cmd)) return handleNotify(ctx, arg.trim());
   return; // أمر غير معروف: تجاهل بصمت
 }
 
@@ -416,7 +460,27 @@ bot.callbackQuery("yes", async (ctx) => {
     const saved = await appendExpenses(userId, p.raw, p.items);
     pending.delete(userId);
     pushHist(userId, "assistant", `اتحفظ: ${saved.map(fmtItem).join("، ")}`);
-    await ctx.editMessageText(`اتحفظ: \n${saved.map(fmtItem).join("\n")}`);
+    let text = `اتحفظ: \n${saved.map(fmtItem).join("\n")}`;
+    // تنبيه فوري لو بند منهم قرب يخلص ميزانيته أو تجاوزها
+    try {
+      const budgets = await getCachedBudgets(userId);
+      if (budgets.length) {
+        const mk = cairoToday().slice(0, 7);
+        const monthRows = (await getAll(userId).catch(() => [])).filter(e => (e.date || "").startsWith(mk) && e.type !== "income");
+        const warns = [];
+        for (const it of saved) {
+          if (it.type === "income") continue;
+          const b = budgets.find(x => x.category === it.category);
+          if (!b?.monthly_limit) continue;
+          const spent = monthRows.filter(e => e.category === it.category).reduce((s, e) => s + e.amount, 0);
+          const pct = spent / b.monthly_limit;
+          if (pct >= 1) warns.push(`تجاوزت ميزانية ${it.category}! (${spent}/${b.monthly_limit})`);
+          else if (pct >= 0.8) warns.push(`قربت تخلص ميزانية ${it.category} (${Math.round(pct * 100)}%)`);
+        }
+        if (warns.length) text += `\n\n${warns.join("\n")}`;
+      }
+    } catch {}
+    await ctx.editMessageText(text);
   } else if (p.kind === "budget") {
     await setBudget(p.category, p.limit);
     pending.delete(userId);
@@ -480,3 +544,5 @@ console.log("Categories:", CATEGORIES.join("، "));
 // الثوابت الشهرية: فحص بعد 30 ثانية من التشغيل ثم كل 6 ساعات
 setTimeout(checkRecurring, 30 * 1000);
 setInterval(checkRecurring, 6 * 3600 * 1000);
+// الملخص الليلي: فحص كل 10 دقايق (يتبعت مرة واحدة بعد 10م)
+setInterval(nightlyCheck, 10 * 60 * 1000);
