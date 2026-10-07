@@ -5,7 +5,6 @@ const SHEET_ID = () => process.env.GOOGLE_SHEET_ID;
 const EXPENSES_TAB = "expenses";
 const BUDGETS_TAB = "budgets";
 const RECURRING_TAB = "recurring"; // مصاريف ثابتة شهرية
-const META_TAB = "meta"; // إعدادات عامة: key | value
 
 function getAuth() {
   const jsonStr = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -74,12 +73,6 @@ export async function ensureHeaders() {
       requestBody: { requests: [{ addSheet: { properties: { title: RECURRING_TAB } } }] },
     });
   }
-  if (!titles.includes(META_TAB)) {
-    await s.spreadsheets.batchUpdate({
-      spreadsheetId: SHEET_ID(),
-      requestBody: { requests: [{ addSheet: { properties: { title: META_TAB } } }] },
-    });
-  }
   const exp = await s.spreadsheets.values.get({
     spreadsheetId: SHEET_ID(), range: `${EXPENSES_TAB}!A1:H1`,
   }).catch(() => null);
@@ -108,16 +101,6 @@ export async function ensureHeaders() {
       spreadsheetId: SHEET_ID(), range: `${RECURRING_TAB}!A1:G1`,
       valueInputOption: "RAW",
       requestBody: { values: [["user_id", "details", "amount", "category", "day", "active", "last_posted"]] },
-    });
-  }
-  const mt = await s.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID(), range: `${META_TAB}!A1:B1`,
-  }).catch(() => null);
-  if (!mt?.data?.values?.length) {
-    await s.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID(), range: `${META_TAB}!A1:B1`,
-      valueInputOption: "RAW",
-      requestBody: { values: [["key", "value"]] },
     });
   }
 }
@@ -277,45 +260,5 @@ export async function setRecurringActive(row, active) {
       spreadsheetId: SHEET_ID(), range: `${RECURRING_TAB}!F${row}`,
       valueInputOption: "RAW", requestBody: { values: [[active ? "yes" : "no"]] },
     });
-  });
-}
-
-// ---------- إعدادات عامة (meta) ----------
-
-export async function getMeta(key) {
-  try {
-    const rows = await withRetry(async () => {
-      const s = await sheets();
-      const res = await s.spreadsheets.values.get({
-        spreadsheetId: SHEET_ID(), range: `${META_TAB}!A2:B200`,
-      });
-      return res.data.values || [];
-    });
-    const found = rows.find(r => r[0] === key);
-    return found ? found[1] : null;
-  } catch {
-    return null;
-  }
-}
-
-export async function setMeta(key, value) {
-  return withRetry(async () => {
-    const s = await sheets();
-    const res = await s.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID(), range: `${META_TAB}!A2:B200`,
-    });
-    const vals = res.data.values || [];
-    const idx = vals.findIndex(r => r[0] === key);
-    if (idx >= 0) {
-      await s.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID(), range: `${META_TAB}!B${idx + 2}`,
-        valueInputOption: "RAW", requestBody: { values: [[String(value)]] },
-      });
-    } else {
-      await s.spreadsheets.values.append({
-        spreadsheetId: SHEET_ID(), range: `${META_TAB}!A:B`,
-        valueInputOption: "RAW", requestBody: { values: [[key, String(value)]] },
-      });
-    }
   });
 }
