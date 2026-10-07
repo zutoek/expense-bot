@@ -12,14 +12,27 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 async function generate(prompt) {
   let lastErr = null;
   for (const m of MODELS) {
-    try {
-      const res = await genAI.getGenerativeModel({ model: m }).generateContent(prompt);
-      return res;
-    } catch (e) {
-      lastErr = e;
-      const hop = e?.status === 429 || e?.status === 404 || /429|quota|Too Many Requests|not found|no longer available/i.test(String(e?.message));
-      console.error(`model ${m} failed: ${String(e?.message).slice(0, 120)}`);
-      if (!hop) throw e; // خطأ حقيقي (مفتاح غلط مثلا): ارميه فورا
+    let retriedNet = false;
+    while (true) {
+      try {
+        const res = await genAI.getGenerativeModel({ model: m }).generateContent(prompt);
+        return res;
+      } catch (e) {
+        lastErr = e;
+        const msg = String(e?.message);
+        // عطل شبكة عابر: محاولة واحدة إضافية بعد ثانيتين لنفس الموديل
+        const net = /EAI_AGAIN|ECONNRESET|ETIMEDOUT|ENOTFOUND|EPIPE|5\d\d|overloaded|fetch failed/i.test(msg + " " + (e?.code || ""));
+        if (net && !retriedNet) {
+          retriedNet = true;
+          console.error(`model ${m} net glitch, retrying...`);
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        const hop = e?.status === 429 || e?.status === 404 || /429|quota|Too Many Requests|not found|no longer available/i.test(msg);
+        console.error(`model ${m} failed: ${msg.slice(0, 120)}`);
+        if (!hop) throw e; // خطأ حقيقي (مفتاح غلط مثلا): ارميه فورا
+        break;
+      }
     }
   }
   throw lastErr;

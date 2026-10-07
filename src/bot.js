@@ -250,7 +250,7 @@ bot.on("message:text", async (ctx) => {
   const userId = ctx.from.id;
   ctx.replyWithChatAction("typing").catch(() => {}); // مؤشر فوري: البوت شغال
   try {
-    const recent = await getRecent(userId, 5);
+    const recent = await getRecent(userId, 5).catch(() => []); // لو الشيت واقع لحظيا كمل من غير سياق
     const hist = history.get(userId) || [];
     const r = await routeMessage(text, { history: hist, recent });
     pushHist(userId, "user", text);
@@ -312,7 +312,7 @@ bot.on("message:text", async (ctx) => {
     if (quota) {
       await ctx.reply("الحصة المجانية للـ AI خلصت النهاردة (20 طلب لكل موديل). استنى شوية وجرب تاني، وقلل التجارب المتكررة.");
     } else {
-      await ctx.reply("حصلت مشكلة في الفهم، جرب تبعت بصيغة أبسط: مثلا (بيض 30 جنيه).");
+      await ctx.reply("حصلت مشكلة مؤقتة في الاتصال، ابعت رسالتك تاني بعد ثواني.");
     }
   }
 });
