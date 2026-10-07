@@ -32,7 +32,7 @@ function uid() {
 }
 
 /** إعادة محاولة تلقائية للأعطال العابرة (DNS/شبكة/429/5xx) */
-async function withRetry(fn, tries = 3) {
+export async function withRetry(fn, tries = 3) {
   let err;
   for (let i = 0; i < tries; i++) {
     try {

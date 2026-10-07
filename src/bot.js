@@ -6,6 +6,7 @@ import {
   ensureHeaders, appendExpenses, getRecent, getAll,
   deleteById, updateAmountById, setBudget, getBudgets,
   addRecurring, getRecurring, setRecurringPosted, setRecurringActive,
+  withRetry,
 } from "./sheets.js";
 
 if (!process.env.TELEGRAM_TOKEN) { console.error("ناقص TELEGRAM_TOKEN في .env"); process.exit(1); }
@@ -68,8 +69,19 @@ function quickCategory(text) {
   return "أخرى";
 }
 
-await ensureHeaders();
-console.log("Sheet headers OK");
+// البورت أولا عشان الاستضافة تشوفنا حيين حتى لو جوجل واقع لحظيا
+const port = Number(process.env.PORT || 3000);
+http.createServer((req, res) => {
+  res.writeHead(200, { "content-type": "text/plain" });
+  res.end("bot running");
+}).listen(port, () => console.log(`healthcheck on ${port}`));
+
+try {
+  await withRetry(ensureHeaders, 4);
+  console.log("Sheet headers OK");
+} catch (e) {
+  console.error("headers failed, continuing without them:", e?.message);
+}
 
 bot.use(async (ctx, next) => {
   try { console.log("update:", JSON.stringify(ctx.message?.text || ctx.callbackQuery?.data || "?").slice(0, 80)); } catch {}
@@ -383,14 +395,6 @@ bot.callbackQuery(/^pick:/, async (ctx) => {
   }
   await ctx.answerCallbackQuery();
 });
-
-// ---------- سيرفر صغير عشان الاستضافة المجانية (Render) ----------
-
-const port = Number(process.env.PORT || 3000);
-http.createServer((req, res) => {
-  res.writeHead(200, { "content-type": "text/plain" });
-  res.end("bot running");
-}).listen(port, () => console.log(`healthcheck on ${port}`));
 
 bot.start();
 console.log("Bot started (polling).");
