@@ -44,6 +44,13 @@ function summarize(list) {
   return { total, byCat: sorted };
 }
 
+// أكبر العمليات في بند معين (عشان الإجمالي لوحده بينسي)
+function topItems(list, category, n = 2) {
+  return list
+    .filter(e => e.category === category && e.type !== "income")
+    .sort((a, b) => b.amount - a.amount)
+    .slice(0, n);
+}
 // كاش الميزانيات 5 دقايق (توفير قراءة شيت + سرعة)
 const budgetCache = new Map(); // userId -> { data, ts }
 async function getCachedBudgets(userId) {
@@ -113,7 +120,10 @@ async function monthReport(ctx) {
   const s1 = summarize(cur), s2 = summarize(prv);
   const budgets = await getCachedBudgets(ctx.from.id);
   let msg = `ملخص ${mk}: الإجمالي ${s1.total} جنيه (الشهر اللي فات: ${s2.total})\nالأعلى:\n`;
-  msg += s1.byCat.slice(0, 5).map(([c, v]) => `- ${c}: ${v}`).join("\n");
+  msg += s1.byCat.slice(0, 5).map(([c, v]) => {
+    const items = topItems(cur, c, 2).map(e => `   • ${e.details || "بدون وصف"}: ${e.amount} (${e.date.slice(5)})`).join("\n");
+    return `- ${c}: ${v}` + (items ? `\n${items}` : "");
+  }).join("\n");
   if (budgets.length) {
     msg += `\n\nالميزانية:`;
     for (const b of budgets) {
@@ -135,9 +145,10 @@ async function sendChart(ctx, cur, mk) {
   const top = summarize(cur).byCat.slice(0, 6);
   if (!top.length) return;
   const total = top.reduce((s, [, v]) => s + v, 0) || 1;
-  const legend = top.map(([c, v], i) =>
-    `${CHART_EMOJI[i % 6]} ${c}: ${v} جنيه (${Math.round((v / total) * 100)}%)`
-  ).join("\n");
+  const legend = top.map(([c, v], i) => {
+    const items = topItems(cur, c, 2).map(e => `\n   - ${e.details || "بدون وصف"}: ${e.amount}`).join("");
+    return `${CHART_EMOJI[i % 6]} ${c}: ${v} جنيه (${Math.round((v / total) * 100)}%)${items}`;
+  }).join("\n");
   try {
     const cfg = {
       type: "doughnut",
