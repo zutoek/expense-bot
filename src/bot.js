@@ -5,6 +5,7 @@ import { routeMessage, analyze, CATEGORIES } from "./ai.js";
 import {
   ensureHeaders, appendExpenses, getRecent, getAll,
   deleteById, updateAmountById, setBudget, getBudgets,
+  addRecurring, getRecurring, setRecurringPosted, setRecurringActive,
 } from "./sheets.js";
 
 if (!process.env.TELEGRAM_TOKEN) { console.error("ناقص TELEGRAM_TOKEN في .env"); process.exit(1); }
@@ -42,6 +43,31 @@ function summarize(list) {
   return { total, byCat: sorted };
 }
 
+// كاش الميزانيات 5 دقايق (توفير قراءة شيت + سرعة)
+const budgetCache = new Map(); // userId -> { data, ts }
+async function getCachedBudgets(userId) {
+  const c = budgetCache.get(userId);
+  if (c && Date.now() - c.ts < 5 * 60 * 1000) return c.data;
+  const data = await getBudgets();
+  budgetCache.set(userId, { data, ts: Date.now() });
+  return data;
+}
+
+function cairoToday() {
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Africa/Cairo" });
+}
+
+// تصنيف سريع للثوابت بالكلمات (من غير AI = أسرع ومجاني)
+function quickCategory(text) {
+  const t = String(text);
+  if (/إيجار|شقة|سكن|بواب/.test(t)) return "سكن";
+  if (/كهرب|ميا|مياه|غاز|نت|تليفون|فاتورة|موبايل|اشتراك نت/.test(t)) return "فواتير";
+  if (/مواصلات|مترو|ميكروباص|أوبر|بنزين/.test(t)) return "مواصلات";
+  if (/علاج|دوا|دكتور|صيدلية/.test(t)) return "صحة";
+  if (/مدرسة|درس|جامعة|كورس/.test(t)) return "تعليم";
+  return "أخرى";
+}
+
 await ensureHeaders();
 console.log("Sheet headers OK");
 
@@ -54,7 +80,7 @@ bot.catch((err) => console.error("BOT ERROR:", err?.message || err));
 // ---------- أوامر ----------
 
 const START_TEXT =
-  "أهلا! ابعت مصروفك بالعربي عادي، مثال:\nاشتريت بيض ورز ب 30 ودفعت 500 كهربا\n\nالأوامر:\n/يومي - صرفت كام النهاردة\n/شهري - ملخص الشهر\n/ميزانية [بند] [مبلغ] - مثال: /ميزانية أكل وشرب 3000\n/undo - تراجع عن آخر تسجيل\n/اسأل [سؤالك] - مثال: /اسأل شيل الفاكهة من حسبة الشهر؟";
+  "أهلا! ابعت مصروفك بالعربي عادي، مثال:\nاشتريت بيض ورز ب 30 ودفعت 500 كهربا\n\nالأوامر:\n/يومي - صرفت كام النهاردة\n/شهري - ملخص الشهر\n/ميزانية [بند] [مبلغ] - مثال: /ميزانية أكل وشرب 3000\n/undo - تراجع عن آخر تسجيل\n/اسأل [سؤالك] - مثال: /اسأل شيل الفاكهة من حسبة الشهر؟\n/ثابت [وصف] [مبلغ] [يوم] - مثال: /ثابت إيجار 2000 1\n/ثوابت - قايمة الثوابت\n/رسم - رسم بياني للشهر";
 
 async function dayReport(ctx) {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "Africa/Cairo" });
@@ -73,7 +99,7 @@ async function monthReport(ctx) {
   const prv = all.filter(e => (e.date || "").startsWith(prev));
   if (!cur.length) return ctx.reply(`مفيش مصاريف في شهر ${mk}.`);
   const s1 = summarize(cur), s2 = summarize(prv);
-  const budgets = await getBudgets();
+  const budgets = await getCachedBudgets(ctx.from.id);
   let msg = `ملخص ${mk}: الإجمالي ${s1.total} جنيه (الشهر اللي فات: ${s2.total})\nالأعلى:\n`;
   msg += s1.byCat.slice(0, 5).map(([c, v]) => `- ${c}: ${v}`).join("\n");
   if (budgets.length) {
@@ -85,6 +111,90 @@ async function monthReport(ctx) {
     }
   }
   await ctx.reply(msg);
+  await sendChart(ctx, cur, mk); // صورة الرسم بعد الملخص
+}
+
+// رسم بياني دائري للشهر: صورة مجانية، وبديل نصي لو الخدمة وقعت
+async function sendChart(ctx, cur, mk) {
+  const top = summarize(cur).byCat.slice(0, 6);
+  if (!top.length) return;
+  try {
+    const cfg = {
+      type: "doughnut",
+      data: {
+        labels: top.map(([c]) => c),
+        datasets: [{ data: top.map(([, v]) => v) }],
+      },
+      options: { plugins: { title: { display: true, text: "مصاريف " + mk } } },
+    };
+    const url = "https://quickchart.io/chart?c=" + encodeURIComponent(JSON.stringify(cfg)) + "&w=600&h=380&f=png";
+    await ctx.replyWithPhoto(url, { caption: `الرسم البياني لشهر ${mk}` });
+  } catch {
+    const max = top[0][1] || 1;
+    const bars = top.map(([c, v]) => `${c}: ${"█".repeat(Math.max(1, Math.round((v / max) * 12)))} ${v}`).join("\n");
+    await ctx.reply(`الرسم كصورة متاحش دلوقتي:\n${bars}`);
+  }
+}
+
+async function handleChart(ctx) {
+  await ctx.replyWithChatAction("typing").catch(() => {});
+  const all = await getAll(ctx.from.id);
+  const mk = cairoToday().slice(0, 7);
+  const cur = all.filter(e => (e.date || "").startsWith(mk));
+  if (!cur.length) return ctx.reply(`مفيش مصاريف في شهر ${mk}.`);
+  await sendChart(ctx, cur, mk);
+}
+
+// ---------- مصاريف ثابتة شهرية ----------
+
+async function handleAddFixed(ctx) {
+  // /ثابت إيجار 2000 1  (وصف + مبلغ + يوم 1-28)
+  const parts = ctx.message.text.split(/\s+/).slice(1);
+  const day = Number(parts.pop());
+  const amount = Number(parts.pop());
+  const details = parts.join(" ").trim();
+  if (!details || !amount || !day || day < 1 || day > 28) {
+    return ctx.reply("الصيغة: /ثابت [وصف] [مبلغ] [يوم 1-28]\nمثال: /ثابت إيجار 2000 1");
+  }
+  const category = quickCategory(details);
+  await addRecurring(ctx.from.id, { details, amount, category, day });
+  await ctx.reply(`تمام، كل يوم ${day} في الشهر هسجل: ${amount} جنيه | ${category} | ${details}`);
+}
+
+async function handleListFixed(ctx) {
+  const all = (await getRecurring()).filter(r => String(r.user_id) === String(ctx.from.id) && r.active);
+  if (!all.length) return ctx.reply("مفيش مصاريف ثابتة. ضيف بـ: /ثابت إيجار 2000 1");
+  await ctx.reply("الثوابت بتاعتك:\n" + all.map((r, i) => `${i + 1}. يوم ${r.day}: ${r.amount} جنيه | ${r.category} | ${r.details}`).join("\n") + "\n\nللحذف: /حذف_ثابت [الرقم]");
+}
+
+async function handleDelFixed(ctx) {
+  const n = Number(ctx.message.text.split(/\s+/)[1]);
+  const all = (await getRecurring()).filter(r => String(r.user_id) === String(ctx.from.id) && r.active);
+  const target = all[n - 1];
+  if (!target) return ctx.reply("رقم غلط. شوف القايمة بـ /ثوابت");
+  await setRecurringActive(target.row, false);
+  await ctx.reply(`وقفت: ${target.details} (${target.amount} جنيه يوم ${target.day})`);
+}
+
+// يشتغل مع بداية التشغيل + كل 6 ساعات: يسجل أي ثابت معاده جه ومينبه صاحبه
+async function checkRecurring() {
+  try {
+    const today = cairoToday();
+    const mk = today.slice(0, 7);
+    const day = Number(today.slice(8, 10));
+    const all = await getRecurring();
+    for (const r of all) {
+      if (!r.active || r.last_posted === mk || day < r.day) continue;
+      await appendExpenses(r.user_id, `ثابت شهري: ${r.details}`, [
+        { amount: r.amount, category: r.category, details: r.details + " (ثابت)", date: today, type: "expense" },
+      ]);
+      await setRecurringPosted(r.row, mk);
+      await bot.api.sendMessage(r.user_id, `اتسجل الثابت الشهري: ${r.amount} جنيه | ${r.category} | ${r.details}`).catch(() => {});
+      console.log(`recurring posted: ${r.details} for ${r.user_id}`);
+    }
+  } catch (e) {
+    console.error("recurring check failed:", e?.message);
+  }
 }
 
 async function handleBudget(ctx) {
@@ -107,7 +217,7 @@ async function handlePing(ctx) { await ctx.reply("شغال"); }
 async function handleAsk(ctx, q) {
   if (!q) return ctx.reply("اكتب سؤالك بعد /اسأل");
   const all = await getAll(ctx.from.id);
-  const budgets = await getBudgets();
+  const budgets = await getCachedBudgets(ctx.from.id);
   const ans = await analyze(q, all, budgets);
   pushHist(ctx.from.id, "user", q);
   pushHist(ctx.from.id, "assistant", ans);
@@ -125,6 +235,10 @@ async function handleSlashText(ctx, text) {
   if (["undo", "تراجع"].includes(cmd)) return undoLast(ctx);
   if (["ping"].includes(cmd)) return handlePing(ctx);
   if (["start"].includes(cmd)) return ctx.reply(START_TEXT);
+  if (["ثابت", "ثابته"].includes(cmd)) return handleAddFixed(ctx);
+  if (["ثوابت", "ثوابتك", "الثوابت"].includes(cmd)) return handleListFixed(ctx);
+  if (["حذف_ثابت", "حذف-ثابت", "مسح_ثابت"].includes(cmd)) return handleDelFixed(ctx);
+  if (["رسم", "رسم_بياني", "chart"].includes(cmd)) return handleChart(ctx);
   return; // أمر غير معروف: تجاهل بصمت
 }
 
@@ -134,6 +248,7 @@ bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
   if (text.startsWith("/")) return handleSlashText(ctx, text); // عربي أو لاتيني
   const userId = ctx.from.id;
+  ctx.replyWithChatAction("typing").catch(() => {}); // مؤشر فوري: البوت شغال
   try {
     const recent = await getRecent(userId, 5);
     const hist = history.get(userId) || [];
@@ -180,7 +295,7 @@ bot.on("message:text", async (ctx) => {
 
     if (r.intent === "query") {
       const all = await getAll(userId);
-      const budgets = await getBudgets();
+      const budgets = await getCachedBudgets(userId);
       const ans = await analyze(r.question || text, all, budgets);
       pushHist(userId, "assistant", ans);
       await ctx.reply(ans);
@@ -243,7 +358,7 @@ bot.callbackQuery("isquery", async (ctx) => {
   const p = pending.get(ctx.from.id);
   if (!p) return ctx.answerCallbackQuery();
   const all = await getAll(ctx.from.id);
-  const budgets = await getBudgets();
+  const budgets = await getCachedBudgets(ctx.from.id);
   const ans = await analyze(p.raw, all, budgets);
   pending.delete(ctx.from.id);
   await ctx.editMessageText(ans);
@@ -280,3 +395,7 @@ http.createServer((req, res) => {
 bot.start();
 console.log("Bot started (polling).");
 console.log("Categories:", CATEGORIES.join("، "));
+
+// الثوابت الشهرية: فحص بعد 30 ثانية من التشغيل ثم كل 6 ساعات
+setTimeout(checkRecurring, 30 * 1000);
+setInterval(checkRecurring, 6 * 3600 * 1000);

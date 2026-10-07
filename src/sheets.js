@@ -4,6 +4,7 @@ import fs from "node:fs";
 const SHEET_ID = () => process.env.GOOGLE_SHEET_ID;
 const EXPENSES_TAB = "expenses";
 const BUDGETS_TAB = "budgets";
+const RECURRING_TAB = "recurring"; // مصاريف ثابتة شهرية
 
 function getAuth() {
   const jsonStr = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
@@ -48,6 +49,12 @@ export async function ensureHeaders() {
       requestBody: { requests: [{ addSheet: { properties: { title: BUDGETS_TAB } } }] },
     });
   }
+  if (!titles.includes(RECURRING_TAB)) {
+    await s.spreadsheets.batchUpdate({
+      spreadsheetId: SHEET_ID(),
+      requestBody: { requests: [{ addSheet: { properties: { title: RECURRING_TAB } } }] },
+    });
+  }
   const exp = await s.spreadsheets.values.get({
     spreadsheetId: SHEET_ID(), range: `${EXPENSES_TAB}!A1:H1`,
   }).catch(() => null);
@@ -66,6 +73,16 @@ export async function ensureHeaders() {
       spreadsheetId: SHEET_ID(), range: `${BUDGETS_TAB}!A1:C1`,
       valueInputOption: "RAW",
       requestBody: { values: [["category", "monthly_limit", "updated_at"]] },
+    });
+  }
+  const rec = await s.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID(), range: `${RECURRING_TAB}!A1:G1`,
+  }).catch(() => null);
+  if (!rec?.data?.values?.length) {
+    await s.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID(), range: `${RECURRING_TAB}!A1:G1`,
+      valueInputOption: "RAW",
+      requestBody: { values: [["user_id", "details", "amount", "category", "day", "active", "last_posted"]] },
     });
   }
 }
@@ -159,4 +176,43 @@ export async function getBudgets() {
     spreadsheetId: SHEET_ID(), range: `${BUDGETS_TAB}!A2:C100`,
   }).catch(() => ({ data: { values: [] } }));
   return (res.data.values || []).map(r => ({ category: r[0], monthly_limit: Number(r[1] || 0) }));
+}
+
+// ---------- مصاريف ثابتة شهرية ----------
+
+export async function addRecurring(userId, { details, amount, category, day }) {
+  const s = await sheets();
+  await s.spreadsheets.values.append({
+    spreadsheetId: SHEET_ID(), range: `${RECURRING_TAB}!A:G`,
+    valueInputOption: "RAW",
+    requestBody: { values: [[String(userId), details, Number(amount), category, Number(day), "yes", ""]] },
+  });
+}
+
+export async function getRecurring() {
+  const s = await sheets();
+  const res = await s.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID(), range: `${RECURRING_TAB}!A2:G200`,
+  }).catch(() => ({ data: { values: [] } }));
+  return (res.data.values || []).map((r, i) => ({
+    row: i + 2, user_id: r[0] || "", details: r[1] || "", amount: Number(r[2] || 0),
+    category: r[3] || "أخرى", day: Number(r[4] || 1),
+    active: (r[5] || "yes") === "yes", last_posted: r[6] || "",
+  }));
+}
+
+export async function setRecurringPosted(row, monthKey) {
+  const s = await sheets();
+  await s.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID(), range: `${RECURRING_TAB}!G${row}`,
+    valueInputOption: "RAW", requestBody: { values: [[monthKey]] },
+  });
+}
+
+export async function setRecurringActive(row, active) {
+  const s = await sheets();
+  await s.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID(), range: `${RECURRING_TAB}!F${row}`,
+    valueInputOption: "RAW", requestBody: { values: [[active ? "yes" : "no"]] },
+  });
 }
