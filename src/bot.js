@@ -127,24 +127,35 @@ async function monthReport(ctx) {
 }
 
 // رسم بياني دائري للشهر: صورة مجانية، وبديل نصي لو الخدمة وقعت
+// رسم بياني دائري للشهر: ألوان فقط على الصورة (العربي يتكسر في Canvas)
+// + شرح نصي بالألوان والمبالغ والنسب (تليجرام يعرض العربي صح)
+const CHART_COLORS = ["#36A2EB", "#FF9F40", "#FF6384", "#4BC0C0", "#9966FF", "#FFCD56"];
+const CHART_EMOJI = ["🟦", "🟧", "🟥", "🟩", "🟪", "🟨"];
 async function sendChart(ctx, cur, mk) {
   const top = summarize(cur).byCat.slice(0, 6);
   if (!top.length) return;
+  const total = top.reduce((s, [, v]) => s + v, 0) || 1;
+  const legend = top.map(([c, v], i) =>
+    `${CHART_EMOJI[i % 6]} ${c}: ${v} جنيه (${Math.round((v / total) * 100)}%)`
+  ).join("\n");
   try {
     const cfg = {
       type: "doughnut",
       data: {
-        labels: top.map(([c]) => c),
-        datasets: [{ data: top.map(([, v]) => v) }],
+        labels: top.map((_, i) => `part ${i + 1}`),
+        datasets: [{ data: top.map(([, v]) => v), backgroundColor: CHART_COLORS }],
       },
-      options: { plugins: { title: { display: true, text: "مصاريف " + mk } } },
+      options: {
+        plugins: {
+          legend: { display: false },
+          datalabels: { color: "#fff", anchor: "center", align: "center" },
+        },
+      },
     };
     const url = "https://quickchart.io/chart?c=" + encodeURIComponent(JSON.stringify(cfg)) + "&w=600&h=380&f=png";
-    await ctx.replyWithPhoto(url, { caption: `الرسم البياني لشهر ${mk}` });
+    await ctx.replyWithPhoto(url, { caption: `مصاريف ${mk} (الإجمالي ${summarize(cur).total} جنيه):\n${legend}` });
   } catch {
-    const max = top[0][1] || 1;
-    const bars = top.map(([c, v]) => `${c}: ${"█".repeat(Math.max(1, Math.round((v / max) * 12)))} ${v}`).join("\n");
-    await ctx.reply(`الرسم كصورة متاحش دلوقتي:\n${bars}`);
+    await ctx.reply(`مصاريف ${mk}:\n${legend}`);
   }
 }
 
