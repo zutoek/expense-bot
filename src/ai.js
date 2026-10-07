@@ -35,7 +35,19 @@ function cleanJson(text) {
   return String(text || "")
     .replace(/```json/gi, "")
     .replace(/```/g, "")
+    .replace(/,\s*([}\]])/g, "$1") // فواصل زائدة قبل القفل
     .trim();
+}
+
+function parseJsonLoose(text, label) {
+  const t = cleanJson(text);
+  try { return JSON.parse(t); } catch {}
+  const m = t.match(/\{[\s\S]*\}/);
+  if (m) {
+    try { return JSON.parse(m[0]); } catch {}
+  }
+  console.error(`AI PARSE FAIL [${label}]:`, String(text).slice(0, 300));
+  throw new Error("AI returned non-JSON");
 }
 
 function todayCairo() {
@@ -82,7 +94,7 @@ ${rec}
 {"intent":"other","reply":"تحية عادية"}`;
 
   const res = await generate(prompt);
-  const parsed = JSON.parse(cleanJson(res.response.text()));
+  const parsed = parseJsonLoose(res.response.text(), "route");
   if (!parsed.intent) parsed.intent = "other";
   return parsed;
 }
@@ -108,5 +120,5 @@ export async function extractOnly(text) {
 التصنيفات: ${CATEGORIES.join("، ")}.
 رد JSON فقط: {"items":[{"amount":0,"category":"أخرى","details":"","date":"${todayCairo()}","type":"expense"}]}`;
   const res = await generate(prompt);
-  return JSON.parse(cleanJson(res.response.text()));
+  return parseJsonLoose(res.response.text(), "extract");
 }
