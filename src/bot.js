@@ -99,7 +99,7 @@ bot.catch((err) => console.error("BOT ERROR:", err?.message || err));
 // ---------- أوامر ----------
 
 const START_TEXT =
-  "أهلا! ابعت مصروفك بالعربي عادي، مثال:\nاشتريت بيض ورز ب 30 ودفعت 500 كهربا\n\nالأوامر:\n/يومي - صرفت كام النهاردة\n/شهري - ملخص الشهر\n/ميزانية [بند] [مبلغ] - مثال: /ميزانية أكل وشرب 3000\n/undo - تراجع عن آخر تسجيل\n/اسأل [سؤالك] - مثال: /اسأل شيل الفاكهة من حسبة الشهر؟\n/ثابت [وصف] [مبلغ] [يوم] - مثال: /ثابت إيجار 2000 1\n/ثوابت - قايمة الثوابت\n/رسم - رسم بياني للشهر";
+  "أهلا! ابعت مصروفك بالعربي عادي، مثال:\nاشتريت بيض ورز ب 30 ودفعت 500 كهربا\n\nالأوامر:\n/يومي - صرفت كام النهاردة\n/شهري - ملخص الشهر\n/ميزانية [بند] [مبلغ] - مثال: /ميزانية أكل وشرب 3000\n/undo - تراجع عن آخر تسجيل\n/اسأل [سؤالك] - مثال: /اسأل شيل الفاكهة من حسبة الشهر؟\n/ثابت [وصف] [مبلغ] [يوم] - مثال: /ثابت إيجار 2000 1\n/ثوابت - قايمة الثوابت\n/رسم - رسم بياني للشهر\n/كشف - كل المعاملات بالتفصيل (ممكن: /كشف 9)";
 
 async function dayReport(ctx) {
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "Africa/Cairo" });
@@ -170,8 +170,41 @@ async function sendChart(ctx, cur, mk) {
   }
 }
 
-async function handleChart(ctx) {
+// كشف تفصيلي: كل المعاملات بوصفها مرتبة حسب البند ثم التاريخ
+async function handleStatement(ctx, arg) {
   await ctx.replyWithChatAction("typing").catch(() => {});
+  const all = await getAll(ctx.from.id);
+  let mk = cairoToday().slice(0, 7);
+  const m = String(arg || "").match(/(\d{4})-(\d{1,2})/) || String(arg || "").match(/(?:شهر\s*)?(\d{1,2})/);
+  if (m) {
+    if (m[2]) mk = `${m[1]}-${String(m[2]).padStart(2, "0")}`;
+    else mk = `${cairoToday().slice(0, 4)}-${String(m[1]).padStart(2, "0")}`;
+  }
+  const cur = all.filter(e => (e.date || "").startsWith(mk)).sort((a, b) => a.date < b.date ? -1 : 1);
+  if (!cur.length) return ctx.reply(`مفيش معاملات في ${mk}.`);
+  const cats = {};
+  for (const e of cur) { (cats[e.category] = cats[e.category] || []).push(e); }
+  let out = [`كشف ${mk} (${cur.length} معاملة):`];
+  for (const [c, items] of Object.entries(cats)) {
+    const sub = items.reduce((s, e) => s + (e.type === "income" ? -e.amount : e.amount), 0);
+    out.push(`\n${c} = ${sub} جنيه`);
+    for (const e of items) {
+      const sign = e.type === "income" ? "دخل" : "مصروف";
+      out.push(`  ${e.date.slice(5)} | ${e.details || "بدون وصف"} | ${e.amount} (${sign})`);
+    }
+  }
+  const total = cur.reduce((s, e) => s + (e.type === "income" ? -e.amount : e.amount), 0);
+  out.push(`\nالصافي: ${total} جنيه`);
+  // قسم الرسالة لو طويلة (حد تليجرام 4096 حرف)
+  let chunk = "";
+  for (const line of out) {
+    if ((chunk + "\n" + line).length > 3500) { await ctx.reply(chunk); chunk = line; }
+    else chunk += "\n" + line;
+  }
+  if (chunk.trim()) await ctx.reply(chunk);
+}
+
+async function handleChart(ctx) {  await ctx.replyWithChatAction("typing").catch(() => {});
   const all = await getAll(ctx.from.id);
   const mk = cairoToday().slice(0, 7);
   const cur = all.filter(e => (e.date || "").startsWith(mk));
@@ -273,6 +306,7 @@ async function handleSlashText(ctx, text) {
   if (["ثوابت", "ثوابتك", "الثوابت"].includes(cmd)) return handleListFixed(ctx);
   if (["حذف_ثابت", "حذف-ثابت", "مسح_ثابت"].includes(cmd)) return handleDelFixed(ctx);
   if (["رسم", "رسم_بياني", "chart"].includes(cmd)) return handleChart(ctx);
+  if (["كشف", "كشف_حساب", "كشف-حساب", "statement"].includes(cmd)) return handleStatement(ctx, arg.trim());
   return; // أمر غير معروف: تجاهل بصمت
 }
 
